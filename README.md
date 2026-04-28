@@ -158,11 +158,11 @@ và các quyết định trade-off, xem `docs/architecture.md` (Phase 2 sẽ có
 |-------|--------------------------------------------------|---------------|
 | 0     | Onboarding GCP + tools                           | ✓ Hoàn thành  |
 | 1     | Go service + kind + ArgoCD (cái bạn đang đọc)    | ✓ Hoàn thành  |
-| 2     | Observability: Prometheus, Grafana, Loki, Tempo  | 🔜 Sắp tới     |
-| 3     | Security: NetworkPolicy, Kyverno, Linkerd mTLS   | 🔜             |
-| 4     | HA & multi-env: Postgres, GCP deploy             | 🔜             |
-| 5     | Canary với Argo Rollouts                         | 🔜             |
-| 6     | FinOps: OpenCost, right-sizing, spot instances   | 🔜             |
+| 2     | Observability: Prometheus, Grafana, Loki, Tempo  | ✓ Hoàn thành  |
+| 3     | Security: NetworkPolicy, Kyverno, Linkerd mTLS   | ✓ Hoàn thành  |
+| 4     | HA & multi-env: Postgres, GCP deploy             | ✓ Hoàn thành  |
+| 5     | Canary với Argo Rollouts                         | ✓ Hoàn thành  |
+| 6     | FinOps: OpenCost, right-sizing, spot instances   | ✓ Hoàn thành  |
 
 ---
 

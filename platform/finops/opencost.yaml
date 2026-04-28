@@ -1,0 +1,157 @@
+---
+# ResourceQuota — giới hạn cứng cho namespace taskr
+# Tránh một bug code vô tình tạo 1000 pod hoặc xin 100GB RAM
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: taskr-quota
+  namespace: taskr
+spec:
+  hard:
+    # Compute
+    requests.cpu:    "2"      # Tổng CPU requests tối đa
+    requests.memory: "1Gi"    # Tổng RAM requests tối đa
+    limits.cpu:      "4"
+    limits.memory:   "2Gi"
+
+    # Workload objects
+    count/pods:        "20"
+    count/deployments.apps: "5"
+    count/services:    "10"
+
+    # Storage
+    requests.storage:  "5Gi"
+
+---
+# LimitRange — default value cho pod không khai báo resources
+# Ngăn pod "free rider" không khai báo limit nhưng ngốn hết RAM node
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: taskr-limits
+  namespace: taskr
+spec:
+  limits:
+    - type: Container
+      default:          # Áp dụng nếu container không khai báo limits
+        cpu:    200m
+        memory: 256Mi
+      defaultRequest:   # Áp dụng nếu container không khai báo requests
+        cpu:    50m
+        memory: 64Mi
+      max:              # Không cho phép xin quá giá trị này
+        cpu:    "2"
+        memory: 1Gi
+      min:              # Phải xin ít nhất giá trị này
+        cpu:    10m
+        memory: 16Mi
+
+    - type: Pod
+      max:
+        cpu:    "2"
+        memory: 1Gi
+
+---
+# OpenCost — cost allocation per namespace/pod
+# Deploy sau khi Prometheus đã có (cần scrape metrics của OpenCost)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencost
+  namespace: observability
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencost
+  template:
+    metadata:
+      labels:
+        app: opencost
+    spec:
+      serviceAccountName: opencost
+      containers:
+        - name: opencost
+          image: ghcr.io/opencost/opencost:latest
+          ports:
+            - name: http
+              containerPort: 9003
+          env:
+            - name: PROMETHEUS_SERVER_ENDPOINT
+              value: "http://prometheus-operated.observability.svc.cluster.local:9090"
+            - name: CLUSTER_ID
+              value: "taskr-local"
+            - name: CLOUD_PROVIDER_API_KEY
+              value: ""  # Để trống cho local
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+        - name: opencost-ui
+          image: ghcr.io/opencost/opencost-ui:latest
+          ports:
+            - name: ui
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 50m
+              memory: 64Mi
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opencost
+  namespace: observability
+
+---
+# ClusterRole cho OpenCost đọc pod/node metrics
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opencost
+rules:
+  - apiGroups: [""]
+    resources: [nodes, pods, services, resourcequotas, persistentvolumes, persistentvolumeclaims, namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: [extensions, apps]
+    resources: [deployments, replicasets, statefulsets, daemonsets]
+    verbs: [get, list, watch]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opencost
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opencost
+subjects:
+  - kind: ServiceAccount
+    name: opencost
+    namespace: observability
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencost
+  namespace: observability
+spec:
+  selector:
+    app: opencost
+  ports:
+    - name: http
+      port: 9003
+      targetPort: http
+    - name: ui
+      port: 9090
+      targetPort: ui

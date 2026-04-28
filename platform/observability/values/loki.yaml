@@ -1,0 +1,86 @@
+# platform/observability/values/loki.yaml
+# Loki — single binary mode, tối giản cho local
+# Chart: grafana/loki version 6.x
+#
+# QUYẾT ĐỊNH: dùng "single binary" (monolithic) thay vì "distributed"
+# Distributed cần 6+ pod (compactor, distributor, querier, ...), quá nặng.
+# Single binary chạy mọi thứ trong 1 pod — đủ cho local dev.
+
+loki:
+  # Monolithic deployment — 1 pod duy nhất
+  deploymentMode: SingleBinary
+
+  auth_enabled: false  # Tắt multi-tenant cho đơn giản
+
+  commonConfig:
+    replication_factor: 1  # local: không cần replicate
+
+  storage:
+    type: filesystem  # Local filesystem, không cần S3/GCS
+
+  # Schema config
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: loki_index_
+          period: 24h
+
+singleBinary:
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  persistence:
+    enabled: false  # Ephemeral — local không cần persist log lâu dài
+
+# Tắt các component distributed không cần
+backend:
+  replicas: 0
+read:
+  replicas: 0
+write:
+  replicas: 0
+
+# Gateway (nginx trước Loki) — tắt để đơn giản
+gateway:
+  enabled: false
+
+# Promtail — agent đọc log từ node và push lên Loki
+# DaemonSet chạy trên mỗi node, đọc /var/log/pods/
+promtail:
+  enabled: true
+  resources:
+    requests:
+      cpu: 25m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
+  config:
+    clients:
+      - url: http://loki.observability.svc.cluster.local:3100/loki/api/v1/push
+    snippets:
+      # Parse JSON log từ zerolog để index các field
+      pipelineStages:
+        - json:
+            expressions:
+              level: level
+              service: service
+              trace_id: trace_id
+              request_id: request_id
+        - labels:
+            level:
+            service:
+        - timestamp:
+            source: timestamp
+            format: UnixMs

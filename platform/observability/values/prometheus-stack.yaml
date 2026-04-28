@@ -1,0 +1,172 @@
+# platform/observability/values/prometheus-stack.yaml
+# kube-prometheus-stack — tối giản cho máy 8GB RAM
+# Chart: https://github.com/prometheus-community/helm-charts
+# Version pin: 65.x (stable tại thời điểm viết)
+#
+# QUYẾT ĐỊNH THIẾT KẾ:
+# - Tắt nodeExporter trên Windows/Mac node (không relevant cho kind)
+# - Tắt kubeEtcd, kubeScheduler metrics (kind không expose)
+# - Prometheus retention 24h (local không cần lâu hơn)
+# - Grafana: tắt persistence (dùng ConfigMap-based dashboards)
+
+# ─── Prometheus ───
+prometheus:
+  prometheusSpec:
+    # Retention thấp để tiết kiệm disk và memory index
+    retention: 24h
+    retentionSize: 1GB
+
+    # Resource budget: 256Mi request, 512Mi limit
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # Scrape interval 30s thay vì 15s default — giảm tải
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+
+    # Chỉ scrape namespace cụ thể, tránh noise từ kube-system
+    podMonitorNamespaceSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    podMonitorSelector: {}
+    serviceMonitorSelector: {}
+    ruleNamespaceSelector: {}
+
+    # Storage: ephemeral cho local, đủ cho 24h data
+    storageSpec:
+      emptyDir:
+        medium: Memory
+        sizeLimit: 512Mi
+
+# ─── Grafana ───
+grafana:
+  # Admin credentials — đổi sau khi deploy
+  adminPassword: "taskr-grafana-admin"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # Tắt persistence, dùng ConfigMap sidecar để load dashboard
+  persistence:
+    enabled: false
+
+  # Sidecar tự động load dashboard từ ConfigMap có label grafana_dashboard=1
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+    datasources:
+      enabled: true
+
+  # Cấu hình datasource mặc định
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      url: http://loki.observability.svc.cluster.local:3100
+      access: proxy
+      isDefault: false
+    - name: Tempo
+      type: tempo
+      url: http://tempo.observability.svc.cluster.local:3100
+      access: proxy
+      isDefault: false
+      jsonData:
+        # Liên kết Tempo trace với Loki log qua traceID
+        tracesToLogs:
+          datasourceUid: loki
+          tags: ["service"]
+          mapTagNamesEnabled: true
+        serviceMap:
+          datasourceUid: prometheus
+
+  # Ingress cho grafana.local
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    hosts:
+      - grafana.local
+    path: /
+
+  grafana.ini:
+    server:
+      root_url: http://grafana.local
+    # Tắt telemetry về Grafana Inc
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+
+# ─── Alertmanager ───
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
+  # Route mọi alert sang webhook test (Phase 2: dùng webhook.site để xem alert)
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      group_by: ["alertname", "namespace"]
+      group_wait: 10s
+      group_interval: 5m
+      repeat_interval: 12h
+      receiver: "webhook-test"
+    receivers:
+      - name: "webhook-test"
+        webhook_configs:
+          # Thay URL này bằng webhook.site URL của bạn để xem alert thật
+          - url: "https://webhook.site/YOUR-UUID-HERE"
+            send_resolved: true
+
+# ─── Các component tắt trên kind ───
+# kind không expose etcd/scheduler metrics qua port chuẩn
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+
+# node-exporter: giữ lại để có node metrics, nhưng tắt trên Windows node
+nodeExporter:
+  enabled: true
+
+# kube-state-metrics: giữ, rất hữu ích cho pod/deployment metrics
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# ─── Prometheus ingress ───
+prometheus:
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    hosts:
+      - prometheus.local
+    paths:
+      - /

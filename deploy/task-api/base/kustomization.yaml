@@ -1,0 +1,32 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kustomization BASE cho task-api
+# ─────────────────────────────────────────────────────────────────────────────
+# "Base" là tập hợp các manifest chung cho MỌI môi trường. Overlay sẽ patch
+# lên base để tùy chỉnh cho local, staging, production, gcp-demo...
+#
+# Quy tắc vàng: base KHÔNG bao giờ chứa thông tin môi trường cụ thể (image
+# tag với SHA, hostname cụ thể, replica count tối ưu cho môi trường đó).
+# Nếu bạn thấy mình copy-paste base nhiều lần, đó là tín hiệu cần tách
+# thêm overlay.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Resources liệt kê toàn bộ YAML file thuộc base.
+# Thứ tự không quan trọng với Kubernetes (eventually consistent), nhưng
+# để dễ đọc, nhóm theo loại: workload → network → policy.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+# commonLabels được thêm vào MỌI resource và MỌI selector.
+# Đây là cách chuẩn để áp nhãn nhất quán theo khuyến nghị của Kubernetes:
+# https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/
+commonLabels:
+  app.kubernetes.io/name: task-api
+  app.kubernetes.io/part-of: taskr
+
+# commonAnnotations ít dùng hơn, nhưng hữu ích cho audit trail.
+commonAnnotations:
+  app.kubernetes.io/managed-by: kustomize

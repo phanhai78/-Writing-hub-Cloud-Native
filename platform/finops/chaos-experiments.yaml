@@ -1,0 +1,60 @@
+---
+# Chaos Experiment 1: Pod kill ngẫu nhiên
+# Mục đích: verify Kubernetes self-healing và PodDisruptionBudget hoạt động
+# Chạy: kubectl apply -f platform/finops/chaos-pod-kill.yaml
+# Expect: pod mới được tạo trong <30s, service không gián đoạn
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: task-api-pod-kill
+  namespace: taskr
+spec:
+  action: pod-kill
+  mode: one           # Kill 1 pod ngẫu nhiên
+  selector:
+    namespaces: [taskr]
+    labelSelectors:
+      app.kubernetes.io/name: task-api
+  scheduler:
+    cron: "@every 10m" # Chạy mỗi 10 phút (chỉ bật khi chaos testing)
+
+---
+# Chaos Experiment 2: Network delay
+# Mục đích: verify timeout handling và retry logic
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: task-api-network-delay
+  namespace: taskr
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces: [taskr]
+    labelSelectors:
+      app.kubernetes.io/name: task-api
+  delay:
+    latency: "200ms"
+    correlation: "25"
+    jitter: "50ms"
+  duration: "5m"    # Chạy 5 phút rồi tự stop
+
+---
+# Chaos Experiment 3: CPU stress
+# Mục đích: verify HPA trigger và resource limits
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: task-api-cpu-stress
+  namespace: taskr
+spec:
+  mode: one
+  selector:
+    namespaces: [taskr]
+    labelSelectors:
+      app.kubernetes.io/name: task-api
+  stressors:
+    cpu:
+      workers: 2   # 2 goroutine đốt CPU
+      load: 80     # 80% CPU load
+  duration: "2m"

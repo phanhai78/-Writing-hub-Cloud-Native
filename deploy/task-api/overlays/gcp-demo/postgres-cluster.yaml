@@ -1,0 +1,69 @@
+---
+# CloudNativePG PostgreSQL Cluster cho Phase 4
+# Operator: https://cloudnative-pg.io/
+# Cài operator trước: kubectl apply -f https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.24/releases/cnpg-1.24.0.yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: taskr-postgres
+  namespace: taskr
+spec:
+  instances: 2  # 1 primary + 1 replica (sync)
+
+  # PostgreSQL 16 LTS
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+
+  # Tự động failover trong vòng 30-60 giây khi primary down
+  failoverDelay: 0
+
+  postgresql:
+    parameters:
+      # Tối giản cho local/demo
+      max_connections: "50"
+      shared_buffers: "32MB"
+      effective_cache_size: "128MB"
+      work_mem: "4MB"
+
+  bootstrap:
+    initdb:
+      database: taskr
+      owner: taskr_user
+      # Secret chứa password — tạo bằng Sealed Secrets (Phase 3)
+      # kubectl create secret generic taskr-postgres-credentials \
+      #   --from-literal=username=taskr_user \
+      #   --from-literal=password=CHANGE_ME \
+      #   -n taskr
+      secret:
+        name: taskr-postgres-credentials
+
+  storage:
+    size: 1Gi
+    storageClass: standard  # kind dùng standard, GKE dùng standard-rwo
+
+  # Backup sang local storage (Phase 4 GCP: đổi sang GCS)
+  # backup:
+  #   barmanObjectStore:
+  #     destinationPath: gs://YOUR_BUCKET/taskr-postgres
+  #     googleCredentials:
+  #       applicationCredentials:
+  #         name: gcs-credentials
+  #         key: credentials.json
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Monitoring tích hợp với Prometheus
+  monitoring:
+    enablePodMonitor: true
+
+---
+# Service để task-api kết nối
+# CloudNativePG tự tạo Service này, định nghĩa ở đây chỉ để document
+# Tên: taskr-postgres-rw (read-write, primary)
+#       taskr-postgres-ro (read-only, replica)
+#       taskr-postgres-r  (round-robin all)

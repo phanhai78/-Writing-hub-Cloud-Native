@@ -1,7 +1,69 @@
-_site/
-.sass-cache/
-.jekyll-cache/
-.jekyll-metadata
+# ─── Binaries ───
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+# Binary build output của Go
+/services/*/task-api
+/services/*/bin/
+/dist/
+
+# ─── Test artifacts ───
+*.test
+*.out
+coverage.out
+coverage.html
+profile.prof
+
+# ─── Go specific ───
+# vendor/ nếu bạn không dùng module (chúng ta dùng module nên không commit vendor)
 vendor/
-.bundle/
-Gemfile.lock
+# Go workspace files (mới từ 1.18+), không commit vì phụ thuộc path máy dev
+go.work
+go.work.sum
+
+# ─── Credentials / secrets ───
+# QUAN TRỌNG: không bao giờ commit credential. Ngay cả file "_example" chứa
+# key thật phải bị chặn ngay tức thì.
+*.pem
+*.key
+*-key.json
+*.secret
+.env
+.env.local
+.env.*.local
+# GCP application default credentials
+.config/gcloud/application_default_credentials.json
+
+# ─── Terraform ───
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+!terraform.tfvars.example
+
+# ─── Kubernetes / Helm ───
+# Helm temp files
+charts/
+.helm/
+
+# ─── Editor / IDE ───
+.idea/
+.vscode/
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── OS ───
+.Trash/
+__pycache__/
+node_modules/
+
+# ─── Tools ───
+.cache/
+tmp/

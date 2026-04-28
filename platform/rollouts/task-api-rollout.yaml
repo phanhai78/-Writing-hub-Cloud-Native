@@ -1,0 +1,179 @@
+---
+# Rollout — thay thế Deployment của task-api
+# Argo Rollouts controller sẽ quản lý pod lifecycle thay vì K8s Deployment controller
+# Cài Argo Rollouts: kubectl apply -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: task-api
+  namespace: taskr
+spec:
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: task-api
+        app.kubernetes.io/component: backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: task-api
+          image: task-api:local-dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: SERVICE_NAME
+              value: "task-api"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+  # ─── Canary Strategy ───
+  strategy:
+    canary:
+      # Service sẽ có traffic split tự động
+      canaryService: task-api-canary   # Service nhận canary traffic
+      stableService: task-api-stable   # Service nhận stable traffic
+
+      # Bước 1: 10% → đợi 5 phút → check metric
+      # Bước 2: 25% → đợi 5 phút → check metric
+      # Bước 3: 50% → đợi 5 phút → check metric
+      # Bước 4: 100% (tự động nếu tất cả step pass)
+      steps:
+        - setWeight: 10
+        - pause:
+            duration: 5m
+        - analysis:
+            templates:
+              - templateName: task-api-success-rate
+            args:
+              - name: service
+                value: task-api-canary
+        - setWeight: 25
+        - pause:
+            duration: 5m
+        - analysis:
+            templates:
+              - templateName: task-api-success-rate
+            args:
+              - name: service
+                value: task-api-canary
+        - setWeight: 50
+        - pause:
+            duration: 5m
+        - analysis:
+            templates:
+              - templateName: task-api-success-rate
+            args:
+              - name: service
+                value: task-api-canary
+
+---
+# AnalysisTemplate — định nghĩa điều kiện để canary được promote/rollback
+# Query Prometheus mỗi 30s, nếu error rate > 5% → fail → auto-rollback
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: task-api-success-rate
+  namespace: taskr
+spec:
+  args:
+    - name: service
+  metrics:
+    - name: success-rate
+      interval: 30s
+      # Phải pass 3 lần liên tiếp mới được promote
+      successCondition: result[0] >= 0.95
+      # Fail 2 lần liên tiếp → rollback
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: http://prometheus-operated.observability.svc.cluster.local:9090
+          query: |
+            sum(rate(http_server_request_duration_seconds_count{
+              namespace="taskr",
+              http_response_status_code!~"5.."
+            }[2m]))
+            /
+            sum(rate(http_server_request_duration_seconds_count{
+              namespace="taskr"
+            }[2m]))
+
+---
+# Service ổn định (nhận traffic stable version)
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-stable
+  namespace: taskr
+spec:
+  selector:
+    app.kubernetes.io/name: task-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+
+---
+# Service canary (nhận traffic canary version)
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api-canary
+  namespace: taskr
+spec:
+  selector:
+    app.kubernetes.io/name: task-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

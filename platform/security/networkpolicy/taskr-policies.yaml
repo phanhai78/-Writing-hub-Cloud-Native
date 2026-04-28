@@ -1,0 +1,151 @@
+---
+# NetworkPolicy Phase 3: Zero-trust networking cho namespace taskr
+#
+# CHIẾN LƯỢC:
+# 1. default-deny tất cả ingress VÀ egress
+# 2. Explicit allow từng luồng cần thiết
+#
+# Luồng cho phép (Phase 3):
+#   ingress-nginx → task-api (port 8080)
+#   task-api → DNS (kube-dns, port 53)
+#   task-api → OTel Collector (port 4317 gRPC)
+#   Prometheus → task-api (scrape /metrics, port 8080)
+
+---
+# Rule 1: Deny tất cả — baseline
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: taskr
+spec:
+  podSelector: {}  # Áp dụng cho mọi pod trong namespace
+  policyTypes:
+    - Ingress
+    - Egress
+  # Không có ingress/egress rules → deny all
+
+---
+# Rule 2: Cho phép ingress-nginx gọi task-api
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-task-api
+  namespace: taskr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Rule 3: Cho phép Prometheus scrape /metrics từ task-api
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: taskr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Rule 4: task-api được phép gọi DNS (kube-dns)
+# Không có rule này → DNS không hoạt động → mọi HTTP call fail
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: taskr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Rule 5: task-api gửi trace đến OTel Collector
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-otel-egress
+  namespace: taskr
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 4317  # OTLP gRPC
+        - protocol: TCP
+          port: 4318  # OTLP HTTP
+
+---
+# Rule 6 (Phase 4): task-api gọi PostgreSQL
+# Uncomment khi Phase 4 deploy CloudNativePG
+# apiVersion: networking.k8s.io/v1
+# kind: NetworkPolicy
+# metadata:
+#   name: allow-postgres-egress
+#   namespace: taskr
+# spec:
+#   podSelector:
+#     matchLabels:
+#       app.kubernetes.io/name: task-api
+#   policyTypes:
+#     - Egress
+#   egress:
+#     - to:
+#         - podSelector:
+#             matchLabels:
+#               cnpg.io/cluster: taskr-postgres
+#       ports:
+#         - protocol: TCP
+#           port: 5432

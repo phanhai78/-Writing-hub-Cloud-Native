@@ -1,0 +1,144 @@
+# Makefile — thêm target Phase 2-6 vào Makefile gốc
+# MERGE file này vào Makefile gốc (Phase 1)
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2 — Observability
+# ═══════════════════════════════════════════════════════════
+
+bootstrap-observability: ## [P2] Cài Prometheus + Grafana + Loki + Tempo + OTel
+	@bash scripts/04-observability.sh
+
+add-observability-hosts: ## [P2] Thêm grafana.local, prometheus.local vào /etc/hosts
+	@echo '127.0.0.1 grafana.local prometheus.local alertmanager.local' | sudo tee -a /etc/hosts
+
+open-grafana: ## [P2] Mở Grafana trong browser
+	@open http://grafana.local || xdg-open http://grafana.local
+
+open-prometheus: ## [P2] Mở Prometheus trong browser
+	@open http://prometheus.local || xdg-open http://prometheus.local
+
+metrics-check: ## [P2] Kiểm tra task-api expose /metrics đúng
+	@curl -sS -H 'Host: taskr.local' http://localhost/metrics | grep -E '^(http_server|go_)' | head -20
+
+# ═══════════════════════════════════════════════════════════
+# Phase 3 — Security
+# ═══════════════════════════════════════════════════════════
+
+bootstrap-security: ## [P3] Cài Kyverno + NetworkPolicy + Sealed Secrets
+	@bash scripts/05-security.sh
+
+scan-image: ## [P3] Quét CVE trong Docker image task-api
+	@if command -v trivy &>/dev/null; then \
+		trivy image --severity CRITICAL,HIGH $(IMAGE_NAME):$(IMAGE_TAG); \
+	else \
+		echo "Trivy chưa cài. Cài: brew install trivy"; exit 1; \
+	fi
+
+policy-check: ## [P3] Test Kyverno policy với pod root (phải bị reject)
+	@echo "Test: deploy pod root — phải bị Kyverno reject..."
+	@kubectl -n taskr run policy-test --image=nginx --overrides='{"spec":{"securityContext":{"runAsUser":0}}}' \
+		--dry-run=server 2>&1 | grep -i "denied\|forbidden" \
+		&& echo "✓ Policy hoạt động đúng" \
+		|| echo "✗ Policy KHÔNG chặn pod root — kiểm tra Kyverno"
+
+seal-secret: ## [P3] Encrypt secret bằng Sealed Secrets. Usage: make seal-secret NAME=my-secret KEY=password VALUE=secret123
+	@echo -n "$(VALUE)" | kubectl create secret generic $(NAME) \
+		--dry-run=client --from-file=$(KEY)=/dev/stdin -o yaml | \
+		kubeseal --format yaml > platform/security/sealed-secrets/$(NAME).yaml
+	@echo "✓ Sealed secret tạo tại platform/security/sealed-secrets/$(NAME).yaml"
+	@echo "  Commit file này an toàn lên Git."
+
+# ═══════════════════════════════════════════════════════════
+# Phase 4 — GCP Deploy
+# ═══════════════════════════════════════════════════════════
+
+# Override: thay YOUR_PROJECT_ID bằng project thật
+GCP_PROJECT ?= YOUR_PROJECT_ID
+GCP_REGION  ?= asia-southeast1
+
+gcp-init: ## [P4] Khởi tạo Terraform state bucket trên GCS
+	@gsutil mb -l $(GCP_REGION) gs://$(GCP_PROJECT)-tfstate 2>/dev/null || true
+	@gsutil versioning set on gs://$(GCP_PROJECT)-tfstate
+	@cd infra/terraform/envs/gcp-demo && \
+		sed -i "s/YOUR_PROJECT_ID/$(GCP_PROJECT)/g" main.tf
+	@cd infra/terraform/envs/gcp-demo && terraform init
+
+gcp-up: ## [P4] Tạo GKE cluster trên GCP (tốn ~$0.20/giờ)
+	@echo "⚠ Cluster sẽ tốn tiền. Nhớ chạy make gcp-down sau khi demo!"
+	@cd infra/terraform/envs/gcp-demo && \
+		terraform apply -var="project_id=$(GCP_PROJECT)" -auto-approve
+	@$(eval GCP_CMD = $(shell cd infra/terraform/envs/gcp-demo && terraform output -raw get_credentials_command))
+	@$(GCP_CMD)
+	@echo "✓ kubectl context đã switch sang GKE cluster"
+
+gcp-push: ## [P4] Build + push image lên Artifact Registry
+	@$(eval REGISTRY = $(GCP_REGION)-docker.pkg.dev/$(GCP_PROJECT)/taskr)
+	@docker build -t $(REGISTRY)/task-api:$(shell git rev-parse --short HEAD) \
+		services/task-api/
+	@docker push $(REGISTRY)/task-api:$(shell git rev-parse --short HEAD)
+	@cd deploy/task-api/overlays/gcp-demo && \
+		kustomize edit set image task-api=$(REGISTRY)/task-api:$(shell git rev-parse --short HEAD)
+
+gcp-deploy: ## [P4] Deploy task-api lên GKE
+	@kubectl apply -k deploy/task-api/overlays/gcp-demo
+	@kubectl -n taskr rollout status deployment/task-api --timeout=5m
+
+gcp-down: ## [P4] XÓA toàn bộ GCP resources (tiết kiệm credit)
+	@echo "⚠ Sẽ xóa toàn bộ GCP resources. Không thể undo!"
+	@read -p "Xác nhận (yes/no): " confirm; [ "$$confirm" = "yes" ] || exit 1
+	@cd infra/terraform/envs/gcp-demo && \
+		terraform destroy -var="project_id=$(GCP_PROJECT)" -auto-approve
+
+gcp-cost-check: ## [P4] Xem ước tính chi phí đã dùng
+	@gcloud billing projects describe $(GCP_PROJECT) 2>/dev/null || \
+		echo "Xem tại: https://console.cloud.google.com/billing"
+
+# ═══════════════════════════════════════════════════════════
+# Phase 5 — Canary / Argo Rollouts
+# ═══════════════════════════════════════════════════════════
+
+bootstrap-rollouts: ## [P5] Cài Argo Rollouts controller
+	@kubectl apply -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+	@kubectl -n argo-rollouts rollout status deployment/argo-rollouts
+
+rollout-status: ## [P5] Xem trạng thái canary rollout
+	@kubectl argo rollouts get rollout task-api -n taskr -w
+
+rollout-promote: ## [P5] Promote canary lên 100% thủ công
+	@kubectl argo rollouts promote task-api -n taskr
+
+rollout-abort: ## [P5] Abort canary, rollback về stable
+	@kubectl argo rollouts abort task-api -n taskr
+	@kubectl argo rollouts undo task-api -n taskr
+
+demo-bug-inject: ## [P5] Inject bug vào task-api để demo auto-rollback
+	@echo "Deploy version với bug (trả 500 ngẫu nhiên 30% request)..."
+	@# Build image với env BUG_INJECT=true
+	@docker build -t task-api:buggy --build-arg BUG_INJECT=true services/task-api/
+	@kind load docker-image task-api:buggy --name taskr
+	@kubectl argo rollouts set image task-api task-api=task-api:buggy -n taskr
+	@echo "Quan sát rollout: make rollout-status"
+	@echo "Sau ~10 phút sẽ tự rollback khi error rate vượt 5%"
+
+# ═══════════════════════════════════════════════════════════
+# Phase 6 — FinOps
+# ═══════════════════════════════════════════════════════════
+
+bootstrap-finops: ## [P6] Cài OpenCost + ResourceQuota
+	@kubectl apply -f platform/finops/opencost.yaml
+	@kubectl apply -f platform/finops/
+
+cost-report: ## [P6] Xem cost allocation theo namespace
+	@kubectl -n observability port-forward svc/opencost 9003:9003 &
+	@sleep 2
+	@curl -sS http://localhost:9003/allocation?window=1d | jq '.data[0] | to_entries[] | {namespace: .key, cost: .value.totalCost}'
+	@kill %1 2>/dev/null || true
+
+chaos-pod-kill: ## [P6] Chaos: kill pod ngẫu nhiên và quan sát recovery
+	@echo "Apply chaos experiment (pod-kill)..."
+	@kubectl apply -f platform/finops/chaos-experiments.yaml
+	@echo "Quan sát: kubectl -n taskr get pods -w"
+	@echo "Xóa experiment sau: kubectl delete -f platform/finops/chaos-experiments.yaml"
+
+right-size-check: ## [P6] Xem đề xuất right-sizing từ VPA (nếu cài)
+	@kubectl -n taskr get vpa task-api -o jsonpath='{.status.recommendation}' | jq

@@ -1,0 +1,83 @@
+# deploy/task-api/overlays/gcp-demo/kustomization.yaml
+# Overlay cho GCP demo session. Khác local ở:
+#   - Image từ Artifact Registry (không phải local kind)
+#   - 2 replicas (HA demo)
+#   - Ingress host dùng nip.io (không cần domain thật)
+#   - APP_STORAGE=postgres + DSN env
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: taskr
+
+resources:
+  - ../../base
+  - namespace.yaml
+  - postgres-cluster.yaml
+
+# Sẽ được thay thế bởi CI script với SHA thật
+# make gcp-push sẽ chạy:
+#   kustomize edit set image task-api=asia-southeast1-docker.pkg.dev/PROJECT/taskr/task-api:SHA
+images:
+  - name: task-api
+    newName: asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/taskr/task-api
+    newTag: latest  # CI sẽ replace thành SHA
+
+patches:
+  - target:
+      kind: Deployment
+      name: task-api
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: task-api
+      spec:
+        replicas: 2
+        template:
+          spec:
+            containers:
+              - name: task-api
+                imagePullPolicy: Always
+                env:
+                  - name: APP_ENV
+                    value: "production"
+                  - name: APP_STORAGE
+                    value: "postgres"
+                  - name: LOG_LEVEL
+                    value: "info"
+                  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                    value: "otel-collector.observability.svc.cluster.local:4317"
+                  - name: DATABASE_URL
+                    valueFrom:
+                      secretKeyRef:
+                        name: taskr-postgres-credentials
+                        key: dsn
+
+  # Ingress: dùng nip.io — trỏ vào Load Balancer IP tự động
+  # Format: <IP>.nip.io → resolve về <IP>
+  # Sau khi apply, lấy LB IP: kubectl -n ingress-nginx get svc ingress-nginx-controller
+  # Rồi cập nhật host bên dưới thành: taskr.<LB_IP>.nip.io
+  - target:
+      kind: Ingress
+      name: task-api
+    patch: |-
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: task-api
+        annotations:
+          nginx.ingress.kubernetes.io/ssl-redirect: "false"
+          # Uncomment khi dùng cert-manager với Let's Encrypt trên GCP:
+          # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+      spec:
+        rules:
+          - host: taskr.REPLACE_WITH_LB_IP.nip.io
+            http:
+              paths:
+                - path: /api
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: task-api
+                      port:
+                        name: http

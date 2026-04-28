@@ -1,0 +1,121 @@
+---
+# Grafana Dashboard — task-api RED Metrics
+# ConfigMap này được sidecar Grafana tự động load nhờ label grafana_dashboard=1
+# Không cần click thủ công trong UI, không mất dashboard khi reset cluster.
+#
+# Dashboard JSON được rút gọn — chỉ giữ 4 panel quan trọng nhất:
+# 1. Request Rate (RPS)
+# 2. Error Rate (%)
+# 3. Latency p50/p95/p99
+# 4. Active pods count
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-task-api
+  namespace: observability
+  labels:
+    grafana_dashboard: "1"  # Label này kích hoạt sidecar auto-load
+data:
+  task-api-dashboard.json: |
+    {
+      "title": "task-api — RED Metrics",
+      "uid": "taskr-task-api-red",
+      "tags": ["taskr", "task-api", "red"],
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": {"from": "now-1h", "to": "now"},
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "type": "constant",
+            "current": {"value": "taskr"}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Request Rate (RPS)",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8},
+          "fieldConfig": {
+            "defaults": {"unit": "reqps", "color": {"mode": "palette-classic"}}
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(http_server_request_duration_seconds_count{namespace=\"taskr\"}[2m])) by (http_route, http_request_method)",
+              "legendFormat": "{{http_request_method}} {{http_route}}"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Error Rate (%)",
+          "type": "timeseries",
+          "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8},
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": {
+                "steps": [
+                  {"value": null, "color": "green"},
+                  {"value": 0.01, "color": "yellow"},
+                  {"value": 0.05, "color": "red"}
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(http_server_request_duration_seconds_count{namespace=\"taskr\",http_response_status_code=~\"5..\"}[2m])) / sum(rate(http_server_request_duration_seconds_count{namespace=\"taskr\"}[2m]))",
+              "legendFormat": "error rate"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Latency Percentiles",
+          "type": "timeseries",
+          "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8},
+          "fieldConfig": {"defaults": {"unit": "s"}},
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum by(le) (rate(http_server_request_duration_seconds_bucket{namespace=\"taskr\"}[2m])))",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by(le) (rate(http_server_request_duration_seconds_bucket{namespace=\"taskr\"}[2m])))",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by(le) (rate(http_server_request_duration_seconds_bucket{namespace=\"taskr\"}[2m])))",
+              "legendFormat": "p99"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Active Pods",
+          "type": "stat",
+          "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8},
+          "fieldConfig": {
+            "defaults": {
+              "thresholds": {
+                "steps": [
+                  {"value": null, "color": "red"},
+                  {"value": 1, "color": "yellow"},
+                  {"value": 2, "color": "green"}
+                ]
+              }
+            }
+          },
+          "targets": [
+            {
+              "expr": "count(kube_pod_status_ready{namespace=\"taskr\",pod=~\"task-api-.*\",condition=\"true\"} == 1)",
+              "legendFormat": "ready pods"
+            }
+          ]
+        }
+      ]
+    }

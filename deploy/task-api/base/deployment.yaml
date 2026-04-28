@@ -1,0 +1,187 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Deployment cho task-api
+# ─────────────────────────────────────────────────────────────────────────────
+# Base manifest — không chứa env-specific config. Các overlay (local, gcp-demo)
+# sẽ patch các giá trị như replica count, resources, image tag.
+#
+# Điểm nhấn:
+#   - securityContext enforced non-root, readOnlyRootFilesystem
+#   - probes: liveness/readiness với thời gian hợp lý
+#   - resources.requests luôn có (bắt buộc cho scheduling); limits theo context
+#   - lifecycle.preStop: sleep 5s để service ra khỏi endpoint trước khi nhận SIGTERM
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-api
+  labels:
+    app.kubernetes.io/name: task-api
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: taskr
+spec:
+  # replicas sẽ được override ở overlay. Base đặt 1 để an toàn.
+  replicas: 1
+
+  # Rolling update strategy — zero downtime khi deploy version mới.
+  # maxSurge=1: thêm tối đa 1 pod mới trước khi xóa pod cũ.
+  # maxUnavailable=0: không bao giờ giảm capacity dưới replicas trong khi update.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: task-api
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: task-api
+        app.kubernetes.io/component: backend
+      annotations:
+        # Prometheus scrape annotations — khi prometheus-stack deployed ở Phase 2,
+        # nó sẽ tự động scrape /metrics endpoint của mọi pod có annotation này.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # ─── Security Context (pod-level) ───
+      # Áp dụng cho toàn bộ pod, container có thể override.
+      # Đây là baseline PodSecurity "restricted" của Kubernetes.
+      securityContext:
+        runAsNonRoot: true        # Không cho phép chạy as root.
+        runAsUser: 65532          # UID của user "nonroot" trong distroless.
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault    # Enable default seccomp profile, block syscall nguy hiểm.
+
+      # terminationGracePeriodSeconds: thời gian K8s chờ pod tự tắt sau SIGTERM.
+      # Phải LỚN HƠN shutdown timeout trong main.go (25s) để graceful shutdown
+      # kịp hoàn thành. 30s là mặc định và đủ cho service này.
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: task-api
+          # Image sẽ được set ở overlay. Dùng placeholder để Kustomize replace.
+          image: task-api:dev
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # ─── Security Context (container-level) ───
+          securityContext:
+            allowPrivilegeEscalation: false  # Không cho setuid.
+            readOnlyRootFilesystem: true     # Filesystem read-only. Service chỉ log ra stdout.
+            capabilities:
+              drop:
+                - ALL                        # Bỏ tất cả Linux capabilities.
+
+          # ─── Environment variables ───
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: SERVICE_NAME
+              value: "task-api"
+            - name: LOG_LEVEL
+              value: "info"
+            # POD_NAME/NAMESPACE cho debugging — log line sẽ có các field này
+            # để tìm nhanh pod nào đang có vấn đề.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          # ─── Probes ───
+          # Liveness: pod còn sống không. Fail -> K8s restart pod.
+          # Đặt initialDelay=10 vì Go service start nhanh; failureThreshold=3
+          # để tránh restart nhầm khi blip nhỏ.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          # Readiness: pod có sẵn sàng nhận traffic không. Fail -> K8s remove
+          # khỏi Service endpoints (không restart). Dùng cho rolling update +
+          # dependency check.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+
+          # Startup probe không cần cho service này vì khởi động < 1s.
+          # Thêm khi service cần thời gian warm-up (load model, cache prewarm, ...).
+
+          # ─── Resources ───
+          # Requests: bắt buộc. K8s scheduler dùng để chọn node.
+          # Limits: đặt bảo thủ. CPU limit gây throttling cho Go runtime nên
+          #   đặt rộng hoặc bỏ; memory limit đặt chặt để tránh OOM node khác.
+          resources:
+            requests:
+              cpu: 50m       # 0.05 vCPU — service rất nhẹ
+              memory: 64Mi
+            limits:
+              cpu: 500m      # 0.5 vCPU limit rộng để không throttle
+              memory: 128Mi  # memory limit chặt
+
+          # ─── Volume cho tmp ───
+          # readOnlyRootFilesystem=true nên /tmp phải là emptyDir
+          # (nhiều Go library dùng /tmp cho scratch space).
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          # ─── Lifecycle hook cho graceful shutdown ───
+          # preStop chạy TRƯỚC khi K8s gửi SIGTERM đến container. Mục đích:
+          # cho endpoint có thời gian được remove khỏi Service trước khi process
+          # bắt đầu shutdown — tránh traffic rơi vào pod đang terminate.
+          #
+          # Distroless không có shell hay sleep binary, nên chúng ta dùng HTTP
+          # endpoint. Service có thể handle /healthz rất nhanh, kubelet sẽ
+          # chờ đến khi request trả về hoặc timeout. Trick: dùng preStop với
+          # httpGet để "waste" vài giây. Không đẹp lắm, phase sau sẽ refactor
+          # bằng cách thêm sleep helper vào Go binary.
+          #
+          # Alternative gọn nhất: dùng Kubernetes 1.29+ với ProbeTerminationGracePeriod
+          # và bỏ hẳn preStop. Với version cũ, dùng sleep container sidecar.
+          #
+          # Ở đây tạm để trống và dựa vào terminationGracePeriodSeconds=30 +
+          # logic shutdown của Go server (25s drain). Đủ tốt cho Phase 1.
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+      # ─── Pod Anti-Affinity (soft) ───
+      # Khuyến khích schedule các replica lên node khác nhau.
+      # "preferredDuringScheduling" = soft constraint, không fail nếu không đủ node.
+      # Ở local 2-node cluster, cả 2 replica sẽ lên 2 node khác nhau.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: task-api
+                topologyKey: kubernetes.io/hostname

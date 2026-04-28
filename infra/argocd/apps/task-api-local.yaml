@@ -1,0 +1,83 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ArgoCD Application: task-api
+# ─────────────────────────────────────────────────────────────────────────────
+# Đây là "đăng ký" task-api vào ArgoCD. Sau khi apply resource này, ArgoCD sẽ:
+#   1. Clone Git repo về
+#   2. Build manifest từ Kustomize overlay
+#   3. So sánh với cluster state
+#   4. Apply các thay đổi (nếu autoSync enabled)
+#   5. Lặp lại mỗi 3 phút (default)
+#
+# Apply: kubectl apply -f infra/argocd/apps/task-api-local.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: task-api-local
+  namespace: argocd
+  # Finalizer đảm bảo khi xóa Application, ArgoCD xóa cả resource
+  # trong cluster thay vì để orphan. Quan trọng cho cleanup sạch.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Project là grouping trong ArgoCD — cho phép chia quyền theo project.
+  # Ở giai đoạn này dùng "default", Phase 3 sẽ tạo custom project với RBAC.
+  project: default
+
+  # ─── Source: Git repo + path + targetRevision ───
+  source:
+    # Repo URL — thay bằng URL repo thật của bạn sau khi push code.
+    # Trong thời gian phát triển, có thể dùng file://... hoặc local path
+    # với argocd-repo-server, nhưng phức tạp hơn.
+    #
+    # MẸO: để test nhanh mà không cần Git remote, có thể tạo Application
+    # với source là "repoURL: ." hoặc mount local folder — xem doc ArgoCD
+    # "Bootstrapping Applications" để biết thêm cách hack local.
+    repoURL: https://github.com/YOUR_USERNAME/cloud-native-taskr.git
+    targetRevision: main
+    path: deploy/task-api/overlays/local
+
+  # ─── Destination: cluster + namespace ───
+  destination:
+    # in-cluster là tên đặc biệt cho cluster mà ArgoCD đang chạy.
+    # Phase 2+ khi ArgoCD quản lý nhiều cluster, đây sẽ là URL/tên cluster.
+    server: https://kubernetes.default.svc
+    namespace: taskr
+
+  # ─── Sync Policy ───
+  syncPolicy:
+    automated:
+      # prune: xóa resource trong cluster mà không còn trong Git. Bật để Git
+      # thực sự là single source of truth. Mới đầu có thể gây hoảng nếu xóa
+      # file nhầm, nhưng đó là pattern đúng.
+      prune: true
+      # selfHeal: nếu ai đó kubectl edit thủ công, ArgoCD sẽ revert về Git state.
+      # Bật để enforce GitOps nghiêm ngặt.
+      selfHeal: true
+      # allowEmpty: cho phép sync khi Git rỗng (không có resource). False để
+      # tránh accidentally xóa mọi thứ khi push commit trống.
+      allowEmpty: false
+
+    syncOptions:
+      # CreateNamespace: ArgoCD tự tạo namespace "taskr" nếu chưa có.
+      # Thay thế cho việc khai báo Namespace resource thủ công.
+      - CreateNamespace=true
+      # PrunePropagationPolicy=foreground: khi xóa, chờ dependent resource
+      # xóa xong mới xóa parent. An toàn hơn background.
+      - PrunePropagationPolicy=foreground
+      # ServerSideApply: dùng server-side apply thay vì client-side. Xử lý
+      # conflict với other controllers tốt hơn (ví dụ HPA modify replicas).
+      - ServerSideApply=true
+
+    # Retry on sync failure — tránh fail vĩnh viễn vì blip mạng tạm thời.
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # ─── Revision history ───
+  # Giữ 10 bản revision để rollback nếu cần. ArgoCD UI có nút rollback
+  # thuận tiện, chọn bản nào trong 10 bản này.
+  revisionHistoryLimit: 10

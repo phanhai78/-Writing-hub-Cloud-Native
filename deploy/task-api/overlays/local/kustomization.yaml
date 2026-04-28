@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Kustomization OVERLAY: local (kind cluster)
+# ─────────────────────────────────────────────────────────────────────────────
+# Overlay "local" dùng khi deploy task-api lên kind cluster trên máy phát
+# triển. So với base, overlay này:
+#   - Đặt namespace rõ ràng
+#   - Giữ replica count = 1 (máy dev thường yếu, không cần HA)
+#   - Dùng image tag "local-dev" với imagePullPolicy=Never
+#     (kind load docker-image sẽ nạp image từ docker daemon của máy vào cluster)
+#   - Đặt LOG_LEVEL=debug để dễ quan sát khi dev
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace sẽ được apply cho mọi resource. Nếu namespace chưa tồn tại,
+# Kustomize KHÔNG tự tạo — phải khai báo trong resources (xem dưới).
+namespace: taskr
+
+resources:
+  # Trỏ tới base qua relative path. Ba ../.. vì overlay nằm sâu 2 level.
+  - ../../base
+  # Namespace resource — tự tạo namespace taskr nếu chưa có.
+  - namespace.yaml
+
+# ─── Image transformation ───
+# images field cho phép đổi image tag mà không phải sửa base/deployment.yaml.
+# Đây là một trong những tính năng mạnh nhất của Kustomize.
+#
+# name: khớp với "image:" trong base (task-api:dev).
+# newTag: tag mới sẽ được dùng.
+# newName: nếu muốn đổi cả repository (ví dụ prefix asia.gcr.io/...).
+images:
+  - name: task-api
+    newName: task-api
+    newTag: local-dev
+
+# ─── Patches ───
+# Dùng strategic merge patch thay vì JSON Patch vì robust hơn với thay đổi
+# thứ tự field trong base. Chỉ cần khớp theo name, các field không nêu
+# sẽ giữ nguyên từ base.
+patches:
+  - target:
+      kind: Deployment
+      name: task-api
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: task-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: task-api
+                imagePullPolicy: Never
+                env:
+                  - name: APP_ENV
+                    value: "development"
+                  - name: LOG_LEVEL
+                    value: "debug"

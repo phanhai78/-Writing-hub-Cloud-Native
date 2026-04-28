@@ -1,0 +1,170 @@
+---
+# ArgoCD Application: observability-stack
+# Quản lý toàn bộ observability namespace qua GitOps.
+# Apply: kubectl apply -f infra/argocd/apps/observability.yaml
+#
+# QUAN TRỌNG: Thứ tự cài đặt quan trọng.
+# kube-prometheus-stack phải cài trước (tạo CRD PrometheusRule, ServiceMonitor).
+# Sau đó Loki, Tempo, OTel Collector mới có thể reference CRD này.
+# ArgoCD sync wave đảm bảo thứ tự này.
+
+# Wave 1: CRD + namespace
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability-crds
+  namespace: argocd
+  annotations:
+    # Sync wave 1 — chạy trước
+    argocd.argoproj.io/sync-wave: "1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/YOUR_USERNAME/cloud-native-taskr.git
+    targetRevision: main
+    path: platform/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+
+---
+# Wave 2: kube-prometheus-stack (Prometheus + Grafana + Alertmanager)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prometheus-stack
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: "65.3.1"
+    helm:
+      valueFiles:
+        - https://raw.githubusercontent.com/YOUR_USERNAME/cloud-native-taskr/main/platform/observability/values/prometheus-stack.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # CRD thay đổi rất ít, skip replace để tránh conflict với Helm
+      - Replace=false
+
+---
+# Wave 3: Loki
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: loki
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: loki
+    targetRevision: "6.16.0"
+    helm:
+      valueFiles:
+        - https://raw.githubusercontent.com/YOUR_USERNAME/cloud-native-taskr/main/platform/observability/values/loki.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# Wave 3: Tempo (song song với Loki)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: tempo
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://grafana.github.io/helm-charts
+    chart: tempo
+    targetRevision: "1.10.3"
+    helm:
+      values: |
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        persistence:
+          enabled: false
+        tempo:
+          reportingEnabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# Wave 4: OTel Collector + Dashboards (sau khi backend sẵn sàng)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: otel-collector
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "4"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://open-telemetry.github.io/opentelemetry-helm-charts
+    chart: opentelemetry-collector
+    targetRevision: "0.108.0"
+    helm:
+      valueFiles:
+        - https://raw.githubusercontent.com/YOUR_USERNAME/cloud-native-taskr/main/platform/observability/values/tempo-otel.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

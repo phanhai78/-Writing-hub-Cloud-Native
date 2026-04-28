@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kind cluster configuration — Cloud Native Taskr
+# ─────────────────────────────────────────────────────────────────────────────
+# Mục tiêu: tạo cluster 3 node (1 control plane + 2 worker) có port mapping
+# để ingress-nginx chạy trên node có thể được truy cập qua localhost:80/443.
+#
+# Khi chạy `kind create cluster --config=infra/kind/cluster.yaml`, kind sẽ:
+#   1. Pull Docker image kindest/node (Kubernetes đóng gói sẵn)
+#   2. Chạy 3 container, mỗi container là 1 node
+#   3. Cấu hình networking giữa các node qua Docker bridge
+#   4. Mở port 80/443 từ control plane ra host của bạn
+#
+# Xóa cluster: kind delete cluster --name taskr
+# ─────────────────────────────────────────────────────────────────────────────
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+
+# Tên cluster. Nếu bạn có nhiều cluster kind cùng lúc, tên giúp phân biệt.
+name: taskr
+
+# ─────── Networking ───────
+networking:
+  # IP family: dùng IPv4 cho đơn giản. IPv6 phức tạp hơn và không cần cho local.
+  ipFamily: ipv4
+
+  # API server port trên host. Kind sẽ expose Kubernetes API qua cổng này.
+  # Mặc định là random, nhưng fix cứng giúp script tự động hóa dễ hơn.
+  apiServerPort: 6443
+
+  # CIDR cho pod và service. Giá trị mặc định của kind thường ổn, nhưng khi
+  # bạn chạy nhiều cluster cùng lúc thì cần tách biệt để tránh collision.
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/16"
+
+  # Tắt CNI mặc định (kindnet) vì chúng ta có thể muốn thay bằng Cilium ở Phase 3.
+  # Giờ tạm để mặc định (true) cho đơn giản.
+  disableDefaultCNI: false
+
+# ─────── Nodes ───────
+nodes:
+  # ─── Control Plane ───
+  # Đây là node quan trọng nhất vì nó chạy etcd, API server, scheduler,
+  # controller manager. Chúng ta map port 80 và 443 vào node này vì đó là nơi
+  # ingress-nginx sẽ được schedule (thông qua nodeSelector "ingress-ready").
+  - role: control-plane
+    # Label tùy chỉnh giúp ingress-nginx biết schedule pod vào đây.
+    # ingress-nginx Helm chart có nodeSelector mặc định cho label này.
+    labels:
+      ingress-ready: "true"
+
+    # Kubeadm patches cho phép customize cluster sâu hơn.
+    # Ở đây ta bật feature gate cho một số tính năng cần ở Phase 2.
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            # node-labels đảm bảo label được apply cả ở kubelet level,
+            # không chỉ ở etcd.
+            node-labels: "ingress-ready=true"
+
+    # Port mapping: đây là phép màu cho phép `curl http://localhost` hoạt động.
+    # containerPort là port trên node kind, hostPort là port trên máy bạn.
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  # ─── Workers ───
+  # Hai worker để có ít nhất một chút phân phối pod. Trong production thường
+  # ít nhất ba worker ở ba AZ khác nhau, nhưng local 2 worker là đủ minh họa.
+  # Nếu máy bạn yếu, có thể giảm xuống 1 worker bằng cách xóa một entry dưới.
+  - role: worker
+    labels:
+      node-tier: "general"
+
+  - role: worker
+    labels:
+      node-tier: "general"
+
+# ─────── Feature Gates ───────
+# Tạm thời không enable gì thêm. Khi cần feature alpha/beta của Kubernetes,
+# thêm vào đây. Ví dụ: "PodSecurity=true".
+featureGates: {}

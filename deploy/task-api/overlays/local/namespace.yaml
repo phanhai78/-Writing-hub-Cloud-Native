@@ -1,0 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespace resource cho môi trường local
+# ─────────────────────────────────────────────────────────────────────────────
+# Namespace là đơn vị isolation logic trong Kubernetes. Mọi resource của
+# task-api sẽ sống trong namespace "taskr". Labels sẵn sàng cho Phase 3
+# khi ta thêm NetworkPolicy selector theo label namespace.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taskr
+  labels:
+    app.kubernetes.io/part-of: taskr
+    # kubernetes.io/metadata.name tự động set bởi K8s, nhưng khai báo tường
+    # minh giúp NetworkPolicy selector không phụ thuộc version K8s.
+    kubernetes.io/metadata.name: taskr
+    # Pod Security Standard — baseline cho Phase 1, sẽ nâng lên restricted ở Phase 3.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

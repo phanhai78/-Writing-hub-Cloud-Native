@@ -1,0 +1,10 @@
+# File này được sinh ra bởi `go mod tidy` sau khi bạn clone repo về.
+# Lý do không commit pre-populated go.sum: checksum có thể khác nhau nếu
+# proxy module khác nhau. Mỗi developer chạy `go mod tidy` một lần để
+# get checksum của môi trường của họ.
+#
+# Chạy lệnh:
+#   cd services/task-api
+#   go mod tidy
+#
+# Sau đó file go.sum thật sẽ được tạo và bạn có thể commit.

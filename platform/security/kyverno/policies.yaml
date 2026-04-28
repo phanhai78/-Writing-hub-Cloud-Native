@@ -1,0 +1,154 @@
+---
+# Policy 1: Bắt buộc chạy non-root
+# Từ chối pod không khai báo runAsNonRoot=true
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+  annotations:
+    policies.kyverno.io/title: Require Non-Root Containers
+    policies.kyverno.io/description: >
+      Pod không được chạy as root. Buộc khai báo runAsNonRoot=true
+      hoặc runAsUser > 0. Tương thích với distroless image (UID 65532).
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-runasnonroot
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [taskr]  # Chỉ enforce namespace ứng dụng
+      validate:
+        message: "Pod phải chạy non-root. Set securityContext.runAsNonRoot=true"
+        pattern:
+          spec:
+            securityContext:
+              runAsNonRoot: true
+
+---
+# Policy 2: Bắt buộc có resource requests
+# Pod không có requests làm scheduler không hoạt động đúng,
+# và node có thể bị OOM khi burst.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-requests
+  annotations:
+    policies.kyverno.io/title: Require Resource Requests
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-cpu-memory-requests
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [taskr]
+      validate:
+        message: "Container phải khai báo resources.requests.cpu và resources.requests.memory"
+        foreach:
+          - list: "request.object.spec.containers[]"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.requests.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.requests.memory || '' }}"
+                    operator: Equals
+                    value: ""
+
+---
+# Policy 3: Chỉ cho phép image từ trusted registry
+# Ngăn deploy image từ Docker Hub không kiểm soát vào namespace production.
+# Whitelist: ghcr.io (GitHub), gcr.io (Google), docker.io/library (official)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict Image Registries
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-registry
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [taskr]
+      validate:
+        message: >
+          Image phải từ registry được phê duyệt:
+          ghcr.io, gcr.io, asia.gcr.io, task-api (local kind)
+        foreach:
+          - list: "request.object.spec.containers[]"
+            pattern:
+              image: "ghcr.io/* | gcr.io/* | asia.gcr.io/* | task-api:*"
+
+---
+# Policy 4: Bắt buộc label chuẩn
+# Đảm bảo mọi deployment có đủ label để monitoring và cost allocation hoạt động.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-standard-labels
+  annotations:
+    policies.kyverno.io/title: Require Standard Labels
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-labels
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet]
+              namespaces: [taskr]
+      validate:
+        message: >
+          Thiếu label bắt buộc. Cần có:
+          app.kubernetes.io/name, app.kubernetes.io/part-of
+        pattern:
+          metadata:
+            labels:
+              app.kubernetes.io/name: "?*"
+              app.kubernetes.io/part-of: "?*"
+
+---
+# Policy 5: Cấm image tag "latest"
+# "latest" không deterministic — mỗi lần pull có thể khác nhau.
+# Bắt buộc dùng tag cụ thể (SHA hoặc semver).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: check-image-tag
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [taskr]
+      validate:
+        message: "Cấm dùng image tag 'latest'. Dùng tag cụ thể (v1.2.3, SHA, local-dev)"
+        foreach:
+          - list: "request.object.spec.containers[]"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.image }}"
+                    operator: Equals
+                    value: "*:latest"
+                  - key: "{{ element.image }}"
+                    operator: NotContains
+                    value: ":"

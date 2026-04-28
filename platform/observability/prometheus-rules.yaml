@@ -1,0 +1,90 @@
+---
+# Namespace observability
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    kubernetes.io/metadata.name: observability
+    pod-security.kubernetes.io/enforce: baseline
+
+---
+# PrometheusRule — alert on symptoms, not causes
+# Nguyên tắc: alert dựa trên trải nghiệm người dùng,
+# không dựa trên CPU/RAM của server.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: taskr-alerts
+  namespace: observability
+  labels:
+    # Label này để Prometheus Operator biết pick up rule này
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: taskr.task-api
+      interval: 30s
+      rules:
+        # Alert 1: Service down
+        # Cách đọc: nếu không có pod task-api nào ready trong 5 phút liên tiếp
+        - alert: TaskApiDown
+          expr: |
+            absent(kube_pod_status_ready{
+              namespace="taskr",
+              pod=~"task-api-.*",
+              condition="true"
+            } == 1)
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "task-api không có pod nào ready"
+            description: >
+              Không tìm thấy pod task-api ở trạng thái Ready trong namespace taskr
+              trong {{ $value }} phút. Kiểm tra: kubectl -n taskr get pods
+            runbook: "https://github.com/YOUR_USERNAME/cloud-native-taskr/blob/main/docs/runbooks/task-api-down.md"
+
+        # Alert 2: Error rate cao (>5%)
+        # Metric này sẽ có sau khi task-api expose /metrics với OTel instrumentation
+        - alert: TaskApiHighErrorRate
+          expr: |
+            (
+              sum(rate(http_server_request_duration_seconds_count{
+                namespace="taskr",
+                http_response_status_code=~"5.."
+              }[5m]))
+              /
+              sum(rate(http_server_request_duration_seconds_count{
+                namespace="taskr"
+              }[5m]))
+            ) > 0.05
+          for: 2m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "task-api error rate vượt 5%"
+            description: >
+              Error rate hiện tại: {{ $value | humanizePercentage }}.
+              Ngưỡng: 5%. Xem traces tại http://grafana.local/explore
+
+        # Alert 3: Latency p99 cao (>500ms)
+        - alert: TaskApiHighLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le) (
+                rate(http_server_request_duration_seconds_bucket{
+                  namespace="taskr"
+                }[5m])
+              )
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "task-api p99 latency vượt 500ms"
+            description: >
+              P99 latency: {{ $value | humanizeDuration }}.
+              Ngưỡng: 500ms.

@@ -1,0 +1,26 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Service ClusterIP cho task-api
+# ─────────────────────────────────────────────────────────────────────────────
+# Service tạo virtual IP ổn định bên trong cluster, route đến các pod
+# match selector. Pod có thể đến/đi nhưng Service IP không đổi, giúp client
+# không phải biết IP pod cụ thể.
+#
+# Type: ClusterIP (mặc định) — chỉ accessible bên trong cluster. Truy cập
+# từ ngoài sẽ đi qua Ingress (file ingress.yaml).
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-api
+  labels:
+    app.kubernetes.io/name: task-api
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: task-api
+  ports:
+    - name: http
+      port: 80           # Port của Service (cluster-internal)
+      targetPort: http   # Port của container (tên, không phải số — robust hơn)
+      protocol: TCP

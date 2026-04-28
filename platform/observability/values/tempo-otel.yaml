@@ -1,0 +1,110 @@
+# platform/observability/values/tempo.yaml
+# Tempo — distributed tracing backend, single binary mode
+# Chart: grafana/tempo version 1.x
+
+tempo:
+  # Single binary — monolithic deployment
+  reportingEnabled: false  # tắt telemetry Grafana Labs
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Lưu trace trên local filesystem, retain 1h (local không cần lâu)
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+
+persistence:
+  enabled: false
+
+# Expose gRPC OTLP port (4317) và HTTP OTLP port (4318)
+# OTel Collector sẽ forward trace đến đây
+service:
+  type: ClusterIP
+
+# Tempo config
+tempo:
+  metricsGenerator:
+    enabled: true  # Sinh RED metrics từ trace → Prometheus
+    remoteWriteUrl: "http://prometheus-operated.observability.svc.cluster.local:9090/api/v1/write"
+
+---
+# platform/observability/values/otel-collector.yaml
+# OpenTelemetry Collector — nhận telemetry từ app, route đến backend
+# Chart: open-telemetry/opentelemetry-collector
+#
+# QUYẾT ĐỊNH: Deployment (1 replica) thay vì DaemonSet
+# DaemonSet phù hợp production (mỗi node có collector riêng, không qua network)
+# Deployment đơn giản hơn cho local 8GB, tiết kiệm RAM ~64Mi × số node
+
+mode: deployment
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# Cấu hình pipeline của OTel Collector
+# Nhận OTLP từ app → xử lý → gửi đến Prometheus/Loki/Tempo
+config:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+  processors:
+    # Batch để giảm số lần gọi mạng
+    batch:
+      timeout: 5s
+      send_batch_size: 512
+    # Memory limiter — quan trọng trên 8GB machine
+    memory_limiter:
+      limit_mib: 100
+      spike_limit_mib: 20
+      check_interval: 5s
+    # Enrich với Kubernetes metadata (pod name, namespace, ...)
+    k8sattributes:
+      passthrough: false
+      extract:
+        metadata:
+          - k8s.pod.name
+          - k8s.namespace.name
+          - k8s.deployment.name
+
+  exporters:
+    # Metrics → Prometheus (remote write)
+    prometheusremotewrite:
+      endpoint: "http://prometheus-operated.observability.svc.cluster.local:9090/api/v1/write"
+    # Traces → Tempo
+    otlp/tempo:
+      endpoint: "http://tempo.observability.svc.cluster.local:4317"
+      tls:
+        insecure: true
+    # Debug exporter — tắt ở production, bật khi debug
+    debug:
+      verbosity: basic
+
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlp/tempo]
+      metrics:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [prometheusremotewrite]

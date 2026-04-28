@@ -1,0 +1,28 @@
+# Loại bỏ mọi file không cần cho Docker build.
+# Build context được gửi sang Docker daemon — context càng nhỏ, build càng nhanh.
+
+# Git metadata
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Test artifacts
+*_test.go
+coverage.*
+*.out
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Build output (từ local go build)
+bin/
+task-api
+
+# CI/CD
+.github/
+.gitlab-ci.yml

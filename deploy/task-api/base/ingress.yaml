@@ -1,0 +1,31 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingress cho task-api
+# ─────────────────────────────────────────────────────────────────────────────
+# Ingress là "cổng vào" từ ngoài cluster tới Service. Ở local (kind), host là
+# taskr.local — cần thêm vào /etc/hosts. Ở GCP demo, sẽ thay thành domain thật.
+#
+# ingress-nginx controller đọc resource này và cấu hình Nginx để route đúng.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-api
+  labels:
+    app.kubernetes.io/name: task-api
+  annotations:
+    # Tắt redirect HTTP->HTTPS ở local vì chưa có cert Let's Encrypt thật.
+    # Ở gcp-demo overlay sẽ bật lại.
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: taskr.local
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: task-api
+                port:
+                  name: http

@@ -41,11 +41,12 @@ accidentally xóa nhầm tài nguyên demo khi đang nghịch dev.
 
 ## Bước 3 — Cài đặt công cụ dòng lệnh
 
-Bạn cần cài bốn công cụ trên máy local. Đoạn dưới đây là cho macOS với Homebrew.
+Bạn cần cài các công cụ trên máy local. Đoạn dưới đây là cho macOS với Homebrew.
 Nếu bạn dùng Linux hoặc Windows WSL, chạy `scripts/00-prerequisites.sh` để được
 hướng dẫn đúng cho hệ điều hành của bạn.
 
 ```bash
+# === Core tools ===
 # Google Cloud SDK — để giao tiếp với GCP
 brew install --cask google-cloud-sdk
 
@@ -63,17 +64,53 @@ brew install helm
 
 # Go 1.22+ — để compile service
 brew install go
+
+# === DevSecOps tools (cài luôn từ Phase 0 để shift-left security) ===
+# Trivy — quét CVE trong filesystem, Dockerfile, container image, IaC
+brew install trivy
+
+# Gitleaks — phát hiện secret bị commit vào Git
+brew install gitleaks
+
+# pre-commit framework — chạy security check trước mỗi commit
+brew install pre-commit
+
+# Checkov — quét misconfiguration trong Terraform, Kubernetes manifest
+brew install checkov
+
+# kubeseal — encrypt secret cho Sealed Secrets (dùng từ Phase 3)
+brew install kubeseal
+
+# cosign — ký và verify container image (dùng từ Phase 5)
+brew install cosign
+
+# syft — generate SBOM (Software Bill of Materials)
+brew install syft
+
+# govulncheck — quét CVE trong Go dependency
+go install golang.org/x/vuln/cmd/govulncheck@latest
 ```
 
 Sau khi cài xong, kiểm tra từng tool:
 
 ```bash
+# Core
 gcloud --version     # Nên thấy Google Cloud SDK 450.x.x trở lên
 kubectl version --client
 kind --version
 helm version
 docker info          # Đảm bảo Docker daemon đang chạy
 go version           # Nên thấy 1.22 trở lên
+
+# DevSecOps
+trivy --version
+gitleaks version
+pre-commit --version
+checkov --version
+kubeseal --version
+cosign version
+syft version
+govulncheck -version
 ```
 
 Nếu bất kỳ lệnh nào báo lỗi `command not found`, mở shell mới (`source ~/.zshrc`
@@ -118,10 +155,17 @@ gcloud services enable \
 Quá trình này mất khoảng 2-3 phút. Một số API phụ thuộc lẫn nhau nên Google sẽ
 enable theo thứ tự đúng.
 
-## Bước 6 — Tạo service account cho Terraform (chỉ khi nào bạn chuẩn bị deploy lên GCP)
+## Bước 6 — Tạo service account cho Terraform với least privilege (DevSecOps)
 
 Phần này bạn *chưa cần làm ngay*. Nó chỉ cần thiết khi bạn đã làm xong Phase 1
-local và muốn triển khai lên GCP để demo. Khi đến lúc đó, quay lại đây:
+local và muốn triển khai lên GCP để demo. Khi đến lúc đó, quay lại đây.
+
+**Nguyên tắc DevSecOps áp dụng cho bước này:** least privilege (chỉ cấp quyền
+tối thiểu cần thiết), không tạo long-lived service account key cho CI/CD (dùng
+Workload Identity Federation thay thế), và tách biệt service account giữa
+Terraform admin (chạy local) và CI/CD pipeline (chạy trên GitHub Actions).
+
+### 6a. Service account cho Terraform admin (chạy local)
 
 ```bash
 export PROJECT_ID=$(gcloud config get-value project)
@@ -130,17 +174,87 @@ export SA_NAME=terraform-admin
 gcloud iam service-accounts create $SA_NAME \
   --display-name="Terraform Admin SA"
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/editor"
+# Thay vì roles/editor (quá rộng), cấp các role cụ thể theo phạm vi project này
+for role in \
+  roles/compute.admin \
+  roles/container.admin \
+  roles/artifactregistry.admin \
+  roles/iam.serviceAccountAdmin \
+  roles/iam.serviceAccountUser \
+  roles/resourcemanager.projectIamAdmin \
+  roles/storage.admin \
+  roles/dns.admin \
+  roles/monitoring.admin \
+  roles/logging.admin; do
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com" \
+    --role="$role" \
+    --condition=None
+done
 
+# Key được tạo tạm thời và KHÔNG commit vào Git (đã có trong .gitignore)
 gcloud iam service-accounts keys create ~/.config/gcloud/terraform-key.json \
   --iam-account=$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com
 ```
 
-Lưu ý: `roles/editor` là quyền khá rộng. Trong môi trường production thật, bạn
-nên tạo custom role với quyền tối thiểu (least privilege). Ở phạm vi dự án học
-tập, editor là đủ và đơn giản.
+### 6b. Workload Identity Federation cho GitHub Actions (KHÔNG dùng key)
+
+CI/CD pipeline ở Phase 5 sẽ deploy lên GCP. Nguyên tắc DevSecOps: **không bao giờ
+lưu service account key vào GitHub Secrets**. Thay vào đó dùng OIDC federation
+giữa GitHub và GCP để pipeline lấy short-lived token (TTL 15 phút).
+
+```bash
+# Tạo Workload Identity Pool
+gcloud iam workload-identity-pools create github-pool \
+  --location=global \
+  --display-name="GitHub Actions Pool"
+
+# Tạo OIDC provider trỏ về GitHub
+gcloud iam workload-identity-pools providers create-oidc github-provider \
+  --location=global \
+  --workload-identity-pool=github-pool \
+  --display-name="GitHub OIDC Provider" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
+  --attribute-condition="assertion.repository_owner == 'YOUR_GITHUB_ORG'" \
+  --issuer-uri="https://token.actions.githubusercontent.com"
+
+# Tạo service account riêng cho CI/CD (tách biệt với terraform-admin)
+gcloud iam service-accounts create github-deployer \
+  --display-name="GitHub Actions Deployer"
+
+# Chỉ cấp các role tối thiểu cần cho deploy
+for role in \
+  roles/container.developer \
+  roles/artifactregistry.writer \
+  roles/iam.workloadIdentityUser; do
+  gcloud projects add-iam-policy-binding $PROJECT_ID \
+    --member="serviceAccount:github-deployer@$PROJECT_ID.iam.gserviceaccount.com" \
+    --role="$role" \
+    --condition=None
+done
+
+# Bind GitHub repo cụ thể với service account (chỉ repo này mới impersonate được)
+export REPO="YOUR_GITHUB_ORG/YOUR_REPO_NAME"
+gcloud iam service-accounts add-iam-policy-binding \
+  github-deployer@$PROJECT_ID.iam.gserviceaccount.com \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')/locations/global/workloadIdentityPools/github-pool/attribute.repository/$REPO"
+```
+
+Sau khi setup xong, lưu ba giá trị này để Phase 5 dùng làm GitHub Secret:
+`GCP_PROJECT_ID`, `GCP_WIF_PROVIDER` (full resource name của provider),
+`GCP_SERVICE_ACCOUNT` (email của `github-deployer`).
+
+### 6c. Organization Policy chặn tạo service account key (khuyến nghị)
+
+Nếu bạn có quyền Organization Admin, bật policy này để chặn vĩnh viễn việc tạo
+key (chống nhân viên hoặc agent vô tình tạo và leak):
+
+```bash
+gcloud resource-manager org-policies enable-enforce \
+  iam.disableServiceAccountKeyCreation \
+  --project=$PROJECT_ID
+```
 
 ## Bước 7 — Thiết lập budget alert
 
@@ -159,7 +273,50 @@ Truy cập `https://console.cloud.google.com/billing` → chọn billing account
 Nếu chi phí vượt 100% (tức $50/tháng), bạn sẽ nhận email ngay. Budget alert
 *không tự động tắt tài nguyên*, chỉ cảnh báo. Việc tắt là trách nhiệm của bạn.
 
-## Bước 8 — Xác nhận sẵn sàng
+## Bước 8 — Thiết lập pre-commit hook (DevSecOps shift-left)
+
+Pre-commit hook chạy security check trước khi commit được tạo ra, chặn từ
+trong trứng các lỗi như secret bị paste vào code, file bí mật vô tình add.
+Đây là lớp phòng thủ rẻ nhất nhưng hiệu quả nhất trong DevSecOps.
+
+Tạo file `.pre-commit-config.yaml` ở root của repo (nếu chưa có):
+
+```yaml
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: detect-private-key
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/bridgecrewio/checkov
+    rev: 3.2.250
+    hooks:
+      - id: checkov
+        args: [-d, infra/terraform, --quiet, --compact]
+```
+
+Kích hoạt:
+
+```bash
+pre-commit install
+pre-commit run --all-files   # chạy thử một lần trên toàn repo
+```
+
+Từ giờ mỗi `git commit` sẽ tự động chạy các check trên. Nếu có lỗi, commit
+bị block. Đây là behavior mong muốn: bạn phải fix trước khi code đến CI.
+
+## Bước 9 — Xác nhận sẵn sàng
 
 Chạy script kiểm tra tổng hợp:
 

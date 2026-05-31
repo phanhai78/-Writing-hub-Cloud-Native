@@ -1,14 +1,17 @@
 # Phase 1 — Local Kubernetes + ArgoCD + task-api
 
-Phase này mục tiêu: có một hệ thống chạy được end-to-end trên máy local.
+Phase này mục tiêu: có một hệ thống chạy được end-to-end trên máy local
+với security baseline đã được áp dụng ngay từ đầu (DevSecOps shift-left).
 Sau khi hoàn tất, bạn sẽ có:
 
 - Một cluster Kubernetes thực sự (3 node) chạy trên Docker.
 - ArgoCD quản lý mọi deployment qua Git.
-- Một Go service `task-api` được deploy với hexagonal architecture.
+- Một Go service `task-api` được deploy với hexagonal architecture, dùng
+  distroless base image và security context non-root.
+- Trivy scan tích hợp vào Makefile, chạy ngay sau khi build image.
 - Smoke test chạy được: `curl` tạo task và query task qua ingress.
 
-Ước tính thời gian: 1-2 giờ nếu chưa quen, 20 phút nếu đã biết.
+Ước tính thời gian: 1-2 giờ nếu chưa quen, 30 phút nếu đã biết.
 
 ---
 
@@ -97,24 +100,70 @@ make get-argocd-password
 Giao diện ArgoCD ở đây chưa có Application nào (do ta chưa tạo). Đây là
 trạng thái ban đầu — sạch và chờ lệnh.
 
-### Bước 6. Build và deploy task-api
+### Bước 6. Build, scan, và deploy task-api
 
 ```bash
 make build              # build image Docker và load vào kind
-make deploy-task-api    # apply Kustomize overlay
+make scan-image         # Trivy scan CVE — gate trước khi deploy (DevSecOps)
+make deploy-task-api    # apply Kustomize overlay (chỉ chạy khi scan pass)
 ```
+
+**Về `make scan-image`:** target này gọi `trivy image --severity HIGH,CRITICAL
+--exit-code 1 task-api:local`. Nếu có CVE HIGH hoặc CRITICAL chưa có patch,
+lệnh exit non-zero và Makefile sẽ dừng — bạn không deploy được image có lỗ
+hổng nặng. Đây là **security gate** đầu tiên trong vòng đời image. Trong Phase
+5, gate này sẽ được lặp lại trong CI pipeline trước khi push lên registry.
+
+Image của task-api đã được hardened sẵn theo các nguyên tắc sau:
+
+- Dùng `gcr.io/distroless/static-debian12` làm base (không có shell, không có
+  package manager, attack surface tối thiểu).
+- Multi-stage build: builder stage có Go toolchain, final stage chỉ có binary.
+- Chạy non-root với `USER 65532:65532` (user nonroot mặc định của distroless).
+- Pin base image về digest cụ thể chứ không dùng tag `latest`.
 
 Sau khi deploy, pod task-api sẽ ở namespace `taskr`. Kiểm tra:
 
 ```bash
 kubectl -n taskr get pods
 kubectl -n taskr logs -l app.kubernetes.io/name=task-api
+
+# Verify security context đã được áp dụng đúng
+kubectl -n taskr get pod -l app.kubernetes.io/name=task-api \
+  -o jsonpath='{.items[0].spec.securityContext}' | jq
+# Phải thấy: runAsNonRoot:true, runAsUser:65532, fsGroup:65532
 ```
 
 **Output mong đợi:** pod `Running` với 1/1 ready. Log hiển thị "HTTP server
-listening" và "initialized in-memory repository".
+listening" và "initialized in-memory repository". Security context có
+`runAsNonRoot: true`.
 
-### Bước 7. Smoke test
+### Bước 7. Quét vulnerability source code và sinh SBOM (DevSecOps)
+
+Trước khi smoke test, chạy thêm hai check security baseline:
+
+```bash
+# Govulncheck — quét CVE trong Go module
+cd services/task-api && govulncheck ./... && cd ../..
+
+# Syft — sinh SBOM (Software Bill of Materials) ở format SPDX
+syft task-api:local -o spdx-json=task-api-sbom.spdx.json
+
+# Verify SBOM có dữ liệu
+jq '.packages | length' task-api-sbom.spdx.json
+# Nên thấy số > 0 (số dependency được liệt kê)
+```
+
+**Vì sao cần SBOM:** SBOM là danh sách đầy đủ mọi component trong image
+(Go module, base image package, version, license). Khi một CVE mới được
+công bố trong tương lai, bạn so SBOM với CVE database để biết ngay image
+của mình có bị ảnh hưởng không, không cần rebuild và scan lại. Đây cũng
+là yêu cầu compliance của NIST SSDF và US EO 14028.
+
+File `task-api-sbom.spdx.json` được commit vào artifact của CI ở Phase 5,
+không commit vào Git repo.
+
+### Bước 8. Smoke test
 
 ```bash
 make smoke-test
@@ -210,3 +259,11 @@ Khi mọi thứ chạy được và bạn đã thử nghiệm CRUD một chút, 
 Tempo vào cluster để bạn thấy được mỗi request đang đi đâu, metric nào
 đang đo, và log nào đang được ghi ra. Đó là bước khi service bắt đầu
 "có giọng nói" và bạn nghe được hệ thống đang "nói" gì.
+
+**Tóm tắt DevSecOps đã có ở Phase 1:** image dùng distroless non-root,
+Trivy scan gate trước deploy, govulncheck quét Go module, SBOM được sinh
+ra cho mọi image build, pre-commit hook chặn secret từ workstation. Các
+phase sau sẽ build trên nền tảng này thêm các lớp: observability tích
+hợp security signal (Phase 2), policy enforcement và mTLS (Phase 3),
+infrastructure-as-code scan (Phase 4), signed image và OIDC deploy
+(Phase 5), security chaos engineering (Phase 6).
